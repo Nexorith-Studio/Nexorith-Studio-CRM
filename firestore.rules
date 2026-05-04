@@ -1,0 +1,114 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasPermission(permission) {
+      let data = getUserData();
+      return isSignedIn() && (
+        ['Admin', 'Co-founder', 'CEO', 'CTO'].contains(data.role) || 
+        data.permissions.contains(permission)
+      );
+    }
+
+    function isOwner(data) {
+      return isSignedIn() && (data.assignedTo == request.auth.uid || data.ownerId == request.auth.uid || data.uid == request.auth.uid);
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validation Blueprints
+    function isValidLead(data) {
+      return data.keys().hasAll(['company', 'name', 'status', 'createdAt', 'updatedAt']) &&
+             data.company is string && data.company.size() < 200 &&
+             data.name is string && data.name.size() < 200;
+    }
+
+    function isValidTask(data) {
+      return data.keys().hasAll(['title', 'status', 'assignedTo', 'createdAt', 'updatedAt', 'createdBy']) &&
+             data.title is string && data.title.size() < 256;
+    }
+
+    // --- COLLECTIONS ---
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if hasPermission('manage_team') || request.auth.uid == userId;
+    }
+
+    match /leads/{leadId} {
+      allow read: if hasPermission('view_all_leads') || isOwner(resource.data);
+      allow create: if hasPermission('manage_leads') && isValidLead(request.resource.data);
+      allow update: if (hasPermission('manage_leads') || isOwner(resource.data)) && 
+                      request.resource.data.diff(resource.data).affectedKeys().hasAny(['notes', 'status', 'assignedTo', 'followUpDate', 'updatedAt']);
+      allow delete: if hasPermission('manage_leads') && getUserData().role in ['Admin', 'Co-founder', 'CEO', 'CTO'];
+    }
+
+    match /clients/{clientId} {
+      allow read: if isSignedIn();
+      allow create: if hasPermission('add_client');
+      allow update: if hasPermission('edit_client') || isOwner(resource.data);
+      allow delete: if hasPermission('delete_client') && getUserData().role in ['Admin', 'Co-founder', 'CEO', 'CTO'];
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isSignedIn() && (hasPermission('view_all_leads') || resource.data.assignedTo == request.auth.uid || resource.data.createdBy == request.auth.uid);
+      allow create: if isSignedIn() && isValidTask(request.resource.data);
+      allow update: if isSignedIn() && (
+        resource.data.assignedTo == request.auth.uid || 
+        resource.data.createdBy == request.auth.uid || 
+        hasPermission('assign_tasks')
+      );
+      allow delete: if hasPermission('assign_tasks');
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && (resource.data.target == 'global' || resource.data.target == request.auth.uid);
+      allow create: if hasPermission('manage_team'); 
+      allow update: if isSignedIn() && (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy'])
+      );
+    }
+
+    match /activityLogs/{logId} {
+      allow read: if hasPermission('view_finance') || 
+                     (isSignedIn() && !(resource.data.entity in ['transaction', 'finance', 'invoice']));
+      allow create: if isSignedIn();
+      allow update, delete: if false; // Immutable audit trail
+    }
+
+    match /invoices/{invoiceId} {
+      allow read: if hasPermission('view_finance');
+      allow create: if hasPermission('manage_finance');
+      allow update: if hasPermission('manage_finance');
+      allow delete: if hasPermission('manage_finance') && getUserData().role in ['Admin', 'Co-founder'];
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if hasPermission('view_finance');
+      allow create: if hasPermission('manage_finance');
+      allow update: if hasPermission('manage_finance');
+      allow delete: if hasPermission('manage_finance') && getUserData().role in ['Admin', 'Co-founder'];
+    }
+
+    // Legacy support
+    match /activity/{id} {
+      allow read, write: if isSignedIn();
+    }
+  }
+}
